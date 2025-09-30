@@ -1,0 +1,143 @@
+#!/bin/sh
+#
+# Copyright (c) 2025 Quentin Thébault <quentin.thebault@defenso.fr>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+BASE_JAIL=minihyve_base
+BASE_JAIL_ROOT="/iocage/jails/$BASE_JAIL/root"
+IOCAGE="/usr/local/bin/iocage"
+export GIT_PYTHON_GIT_EXECUTABLE="/usr/local/bin/git"
+
+# start <vm name>
+minihyve_start ( ) {
+    local _vm_name="$1"
+    local _vm_if=$(\
+        grep -vE '^#' /VMs/${_vm_name}/${_vm_name}.conf \
+        | grep -oE 'vmnet[[:digit:]]+' \
+        | tail -n 1\
+    )
+
+    local _jail_name="minihyve_$_vm_name"
+    local _jail_root="/iocage/jails/$_jail_name/root"
+    local _jail_fstab="/iocage/jails/$_jail_name/fstab"
+
+    local _last_ruleset=$(devfs rule showsets | sort -n | tail -n 1)
+    local _ruleset=$(($_last_ruleset+1))
+
+    echo Preparing to start $_vm_name
+
+    ## Create devfs rulset with correct network interface and vmm.io paths
+    echo Creating ruleset $_ruleset
+    devfs rule -s $_ruleset add hide
+    devfs rule -s $_ruleset add path null unhide
+    devfs rule -s $_ruleset add path zero unhide
+    devfs rule -s $_ruleset add path crypto unhide
+    devfs rule -s $_ruleset add path random unhide
+    devfs rule -s $_ruleset add path urandom unhide
+    devfs rule -s $_ruleset add path pts unhide
+    devfs rule -s $_ruleset add path 'pts/*' unhide
+    devfs rule -s $_ruleset add path $_vm_if unhide
+    devfs rule -s $_ruleset add path vmm unhide
+    devfs rule -s $_ruleset add path vmm/$_vm_name unhide
+    devfs rule -s $_ruleset add path vmm.io unhide
+    devfs rule -s $_ruleset add path vmm.io/$_vm_name.framebuffer unhide
+    devfs rule -s $_ruleset add path vmm.io/$_vm_name.bootrom unhide
+    devfs rule -s $_ruleset add path nmdm-$_vm_name.1A unhide
+    devfs rule -s $_ruleset add path nmdm-$_vm_name.1B unhide
+
+    ## Create jail
+    ${IOCAGE} create -e -n $_jail_name vnet=1 allow_vmm=1 \
+        ip4=disable defaultrouter=none \
+        ip6=disable defaultrouter6=none \
+        interfaces=vnet0:none mount_fdescfs=0 \
+        resolver=/dev/null host_time=0 \
+        devfs_ruleset=$_ruleset
+
+    ## Mount vm-bhyve directories
+    mkdir -p $_jail_root/VMs/.config
+    mkdir -p $_jail_root/VMs/$_vm_name
+    echo /VMs/.config $_jail_root/VMs/.config nullfs ro 0 0 >> $_jail_fstab
+    echo /VMs/$_vm_name $_jail_root/VMs/$_vm_name nullfs rw 0 0 >> $_jail_fstab
+
+    ## Prepare jail filesystem
+    mkdir -p $_jail_root/bin
+    mkdir -p $_jail_root/boot
+    mkdir -p $_jail_root/dev
+    mkdir -p $_jail_root/etc
+    mkdir -p $_jail_root/lib
+    mkdir -p $_jail_root/libexec
+    mkdir -p $_jail_root/root
+    mkdir -p $_jail_root/sbin
+    mkdir -p $_jail_root/tmp
+    mkdir -p $_jail_root/usr
+    mkdir -p $_jail_root/var/run
+    mkdir -p $_jail_root/var/db
+    mkdir -p $_jail_root/var/spool/lock
+
+    ## Prepare jail fstab
+    echo $BASE_JAIL_ROOT/bin        $_jail_root/bin     nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/boot       $_jail_root/boot    nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/etc        $_jail_root/etc     nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/lib        $_jail_root/lib     nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/libexec    $_jail_root/libexec nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/root       $_jail_root/root    nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/sbin       $_jail_root/sbin    nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/usr        $_jail_root/usr     nullfs ro 0 0 >> $_jail_fstab
+    echo $BASE_JAIL_ROOT/var/db     $_jail_root/var/db  nullfs ro 0 0 >> $_jail_fstab
+
+    ## Start jail and VM
+    ${IOCAGE} start $_jail_name
+    ${IOCAGE} exec $_jail_name vm start $_vm_name
+}
+
+# stop <vm name>
+minihyve_stop ( ) {
+    local _vm_name="$1"
+    local _jail_name="minihyve_$_vm_name"
+
+    ## Stop the VM, waiting if necessary
+    ${IOCAGE} exec $_jail_name vm stop $_vm_name || return 1
+    until ${IOCAGE} exec $_jail_name vm list | grep -q Stopped
+    do
+        sleep 3
+    done
+
+    ## Stop the jail
+    ${IOCAGE} stop $_jail_name
+
+    ## Get the devfs_ruleset from config - once jail stopped
+    local _ruleset=$(${IOCAGE} get devfs_ruleset $_jail_name)
+
+    ## Destroy the jail
+    ${IOCAGE} destroy -f $_jail_name
+
+    ## Remove devfs ruleset
+    devfs rule -s $_ruleset delset
+}
+
+# cmd <vm name> <command>
+## Send command to the jail
+minihyve_cmd ( ) {
+    local _vm_name="$1"
+    local _jail_name="minihyve_$_vm_name"
+
+    shift 1
+    ${IOCAGE} exec $_jail_name $@
+}
+
+minihyve_list ( ) {
+    ${IOCAGE} list -H \
+    | grep up | grep minihyve \
+    | cut -wf 2 | cut -d _ -f 2
+}
+
+_cmd=$1
+shift 1
+case "$_cmd" in
+    start)  minihyve_start $@ ;;
+    stop)   minihyve_stop $@ ;;
+    list)   minihyve_list ;;
+    cmd)    minihyve_cmd $@ ;;
+    *)      echo "Unknown command: $_cmd"
+esac

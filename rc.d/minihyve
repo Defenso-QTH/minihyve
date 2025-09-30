@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# Copyright (c) 2025 Quentin Thébault <quentin.thebault@defenso.fr>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+# PROVIDE: minihyve
+# REQUIRE: NETWORKING SERVERS dmesg
+# BEFORE: dnsmasq ipfw pf
+# KEYWORD: shutdown nojailvnet
+
+. /etc/rc.subr
+
+name=minihyve
+rcvar=minihyve_enable
+load_rc_config $name
+
+: ${minihyve_enable:=NO}
+: ${minihyve_autostart:=""}
+
+command=/usr/local/sbin/minihyve
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+
+minihyve_start ( ) {
+    if [ "${minihyve_autostart}" ]; then
+        for vm_name in ${minihyve_autostart}
+        do
+            echo "Starting minihyve: ${vm_name}"
+            ${command} start ${vm_name}
+        done
+    fi
+}
+
+minihyve_status ( ) {
+    echo running minihyve_status
+    running_list=$(${command} list)
+    if [ "${running_list}" ]; then
+        echo "minihyve running with VMs: ${running_list}."
+    else
+        echo "no minihyve VMs running"
+    fi
+}
+
+minihyve_stop ( ) {
+    running_list=$(${command} list)
+    if [ "${running_list}" ]; then
+        for vm_name in ${running_list}
+        do
+            echo "Stopping minihyve: ${vm_name}"
+            ${command} stop ${vm_name}
+        done
+    fi
+}
+
+run_rc_command $1
